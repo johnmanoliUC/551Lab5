@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ENGO551 Lab 5</title>
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+    crossorigin=""
+  >
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      padding: 12px;
+      font-family: Arial, sans-serif;
+      background: #f7f7f7;
+      color: #222222;
+    }
+
+    main {
+      max-width: 820px;
+      margin: 0 auto;
+    }
+
+    h1 {
+      margin-top: 0;
+    }
+
+    section {
+      margin-bottom: 12px;
+      padding: 12px;
+      background: #ffffff;
+      border: 1px solid #cccccc;
+      border-radius: 6px;
+    }
+
+    label {
+      display: block;
+      margin-bottom: 8px;
+      font-weight: 600;
+    }
+
+    input,
+    textarea,
+    button {
+      width: 100%;
+      padding: 8px;
+      margin-top: 4px;
+      font: inherit;
+    }
+
+    textarea {
+      resize: vertical;
+    }
+
+    .buttons {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      margin-top: 8px;
+    }
+
+    #status {
+      margin: 0 0 12px;
+      padding: 10px;
+      background: #e9f2fb;
+      border: 1px solid #c8dff5;
+      border-radius: 6px;
+      font-weight: 600;
+    }
+
+    #map {
+      height: 400px;
+      border: 1px solid #cccccc;
+      border-radius: 6px;
+    }
+
+    @media (max-width: 600px) {
+      .buttons {
+        grid-template-columns: 1fr;
+      }
+
+      #map {
+        height: 320px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>ENGO551 Lab 5</h1>
+
+    <section>
+      <label>
+        Broker Host
+        <input id="host" type="text" value="test.mosquitto.org">
+      </label>
+
+      <label>
+        Broker Port
+        <input id="port" type="number" value="8081">
+      </label>
+
+      <div class="buttons">
+        <button id="start" type="button">Start</button>
+        <button id="end" type="button" disabled>End</button>
+      </div>
+    </section>
+
+    <section>
+      <label>
+        Custom Topic
+        <input id="custom-topic" type="text" placeholder="Enter any topic">
+      </label>
+
+      <label>
+        Custom Message
+        <textarea id="custom-message" rows="4" placeholder="Type a message"></textarea>
+      </label>
+
+      <div class="buttons">
+        <button id="publish" type="button" disabled>Publish</button>
+        <button id="share" type="button" disabled>Share My Status</button>
+      </div>
+    </section>
+
+    <p id="status">Disconnected.</p>
+    <div id="map"></div>
+  </main>
+
+  <script
+    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+    crossorigin=""
+  ></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.0.1/mqttws31.min.js"></script>
+  <script>
+    const STATUS_TOPIC = "ENGO551/john_m/my_temperature";
+    const WEBSOCKET_PATH = "/mqtt";
+    const map = L.map("map").setView([51.0447, -114.0719], 11);
+
+    const hostInput = document.getElementById("host");
+    const portInput = document.getElementById("port");
+    const customTopicInput = document.getElementById("custom-topic");
+    const customMessageInput = document.getElementById("custom-message");
+    const startButton = document.getElementById("start");
+    const endButton = document.getElementById("end");
+    const publishButton = document.getElementById("publish");
+    const shareButton = document.getElementById("share");
+    const statusText = document.getElementById("status");
+
+    let client = null;
+    let marker = null;
+    let manualDisconnect = false;
+    let reconnectTimer = null;
+
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 19,
+      attribution: "&copy; OpenStreetMap contributors"
+    }).addTo(map);
+
+    startButton.addEventListener("click", startConnection);
+    endButton.addEventListener("click", endConnection);
+    publishButton.addEventListener("click", publishMessage);
+    shareButton.addEventListener("click", shareMyStatus);
+
+    function startConnection() {
+      const host = hostInput.value.trim();
+      const port = Number(portInput.value);
+
+      if (!host || !port) {
+        setStatus("Enter a broker host and port.");
+        return;
+      }
+
+      manualDisconnect = false;
+      hostInput.disabled = true;
+      portInput.disabled = true;
+      startButton.disabled = true;
+      endButton.disabled = false;
+      publishButton.disabled = true;
+      shareButton.disabled = true;
+      setStatus("Connecting...");
+
+      client = new Paho.MQTT.Client(
+        host,
+        port,
+        WEBSOCKET_PATH,
+        "engo551_" + Math.random().toString(16).slice(2, 10)
+      );
+
+      client.onConnectionLost = handleConnectionLost;
+      client.onMessageArrived = handleMessageArrived;
+
+      client.connect({
+        useSSL: Number(port) === 8081 || Number(port) === 443,
+        timeout: 5,
+        onSuccess: handleConnected,
+        onFailure: function (error) {
+          client = null;
+          setStatus("Connection failed: " + (error.errorMessage || "Unable to connect.") + " Click End to edit host or port.");
+        }
+      });
+    }
+
+    function handleConnected() {
+      client.subscribe(STATUS_TOPIC, {
+        onSuccess: function () {
+          publishButton.disabled = false;
+          shareButton.disabled = false;
+          setStatus("Connected. Subscribed to " + STATUS_TOPIC + ".");
+        },
+        onFailure: function () {
+          publishButton.disabled = false;
+          shareButton.disabled = false;
+          setStatus("Connected, but subscribe failed.");
+        }
+      });
+    }
+
+    function handleConnectionLost(response) {
+      publishButton.disabled = true;
+      shareButton.disabled = true;
+
+      if (manualDisconnect) {
+        return;
+      }
+
+      client = null;
+      setStatus((response.errorMessage || "Connection lost.") + " Reconnecting...");
+
+      if (!reconnectTimer) {
+        reconnectTimer = setTimeout(function () {
+          reconnectTimer = null;
+
+          if (!manualDisconnect) {
+            startConnection();
+          }
+        }, 3000);
+      }
+    }
+
+    function endConnection() {
+      manualDisconnect = true;
+
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+
+      if (client && client.isConnected()) {
+        client.disconnect();
+      }
+
+      client = null;
+      hostInput.disabled = false;
+      portInput.disabled = false;
+      startButton.disabled = false;
+      endButton.disabled = true;
+      publishButton.disabled = true;
+      shareButton.disabled = true;
+      setStatus("Disconnected.");
+    }
+
+    function publishMessage() {
+      if (!client || !client.isConnected()) {
+        setStatus("Connect first.");
+        return;
+      }
+
+      const topic = customTopicInput.value.trim();
+      const messageText = customMessageInput.value.trim();
+
+      if (!topic || !messageText) {
+        setStatus("Enter a custom topic and message.");
+        return;
+      }
+
+      const message = new Paho.MQTT.Message(messageText);
+      message.destinationName = topic;
+      client.send(message);
+      setStatus("Published to " + topic + ".");
+    }
+
+    function shareMyStatus() {
+      if (!client || !client.isConnected()) {
+        setStatus("Connect first.");
+        return;
+      }
+
+      if (!navigator.geolocation) {
+        setStatus("Geolocation is not available in this browser.");
+        return;
+      }
+
+      setStatus("Getting current location...");
+
+      navigator.geolocation.getCurrentPosition(
+        function (position) {
+          const longitude = position.coords.longitude;
+          const latitude = position.coords.latitude;
+          const temperature = Math.floor(Math.random() * 101) - 40;
+          const geoJson = {
+            type: "Feature",
+            geometry: {
+              type: "Point",
+              coordinates: [longitude, latitude]
+            },
+            properties: {
+              temperature: temperature
+            }
+          };
+
+          const message = new Paho.MQTT.Message(JSON.stringify(geoJson));
+          message.destinationName = STATUS_TOPIC;
+          client.send(message);
+          setStatus("Shared status to " + STATUS_TOPIC + ".");
+        },
+        function (error) {
+          setStatus("Geolocation error: " + error.message);
+        },
+        {
+          enableHighAccuracy: true,
+          timeout: 10000,
+          maximumAge: 0
+        }
+      );
+    }
+
+    function handleMessageArrived(message) {
+      if (message.destinationName !== STATUS_TOPIC) {
+        return;
+      }
+
+      let data;
+
+      try {
+        data = JSON.parse(message.payloadString);
+      } catch (error) {
+        setStatus("Received invalid JSON on the status topic.");
+        return;
+      }
+
+      if (
+        !data ||
+        data.type !== "Feature" ||
+        !data.geometry ||
+        data.geometry.type !== "Point" ||
+        !Array.isArray(data.geometry.coordinates)
+      ) {
+        setStatus("Received invalid GeoJSON on the status topic.");
+        return;
+      }
+
+      const longitude = Number(data.geometry.coordinates[0]);
+      const latitude = Number(data.geometry.coordinates[1]);
+      const temperature = Number(data.properties && data.properties.temperature);
+
+      if (Number.isNaN(longitude) || Number.isNaN(latitude) || Number.isNaN(temperature)) {
+        setStatus("Received invalid coordinates or temperature.");
+        return;
+      }
+
+      updateMap(latitude, longitude, temperature);
+      setStatus("Map updated from " + STATUS_TOPIC + ".");
+    }
+
+    function updateMap(latitude, longitude, temperature) {
+      const color = getColor(temperature);
+
+      if (marker) {
+        map.removeLayer(marker);
+      }
+
+      marker = L.circleMarker([latitude, longitude], {
+        radius: 10,
+        color: color,
+        fillColor: color,
+        fillOpacity: 0.9,
+        weight: 2
+      }).addTo(map);
+
+      marker.bindPopup("Temperature: " + temperature + " C");
+      map.setView([latitude, longitude], 15);
+    }
+
+    function getColor(temperature) {
+      if (temperature < 10) {
+        return "blue";
+      }
+
+      if (temperature < 30) {
+        return "green";
+      }
+
+      return "red";
+    }
+
+    function setStatus(message) {
+      statusText.textContent = message;
+    }
+  </script>
+</body>
+</html>
